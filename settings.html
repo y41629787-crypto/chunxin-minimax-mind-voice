@@ -1,0 +1,43 @@
+<div id="chunxin-mind-voice-settings" class="extension_container">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>春心错认 MiniMax 心声语音</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <label for="chunxin-mind-voice-id">MiniMax 音色 ID</label>
+            <input id="chunxin-mind-voice-id" class="text_pole" type="text" autocomplete="off" placeholder="例如：male-qn-qingse">
+
+            <label for="chunxin-mind-voice-model">语音模型</label>
+            <select id="chunxin-mind-voice-model" class="text_pole">
+                <option value="speech-2.8-hd">speech-2.8-hd（默认）</option>
+                <option value="speech-2.8-turbo">speech-2.8-turbo</option>
+            </select>
+
+            <label for="chunxin-mind-voice-language">语言增强</label>
+            <select id="chunxin-mind-voice-language" class="text_pole">
+                <option value="auto">自动识别（默认）</option>
+                <option value="Chinese">普通话</option>
+                <option value="Chinese,Yue">粤语</option>
+            </select>
+
+            <label for="chunxin-mind-voice-speed">语速 <span id="chunxin-mind-voice-speed-value">1.0×</span></label>
+            <input id="chunxin-mind-voice-speed" class="text_pole" type="range" min="0.5" max="2.0" step="0.1" value="1.0">
+
+            <label for="chunxin-mind-voice-region">API 接口地区</label>
+            <select id="chunxin-mind-voice-region" class="text_pole">
+                <option value="domestic">国内（api.minimaxi.com，默认）</option>
+                <option value="international">国际（api.minimax.io）</option>
+            </select>
+            <small>请按所选地区配置对应的 MiniMax API Key。</small>
+
+            <label for="chunxin-mind-voice-api-key">MiniMax API Key</label>
+            <div class="chunxin-mind-voice-key-row">
+                <input id="chunxin-mind-voice-api-key" class="text_pole" type="password" autocomplete="new-password" autocapitalize="off" spellcheck="false" placeholder="填写自己的 MiniMax API Key">
+                <button id="chunxin-mind-voice-clear-api-key" class="menu_button" type="button">清除</button>
+            </div>
+            <small class="chunxin-mind-voice-security-warning">Key 保存在你自己的酒馆扩展设置中；同一酒馆内的其他脚本或扩展可能读取它，安全性低于服务端密钥管理。请求由浏览器直接发送到所选的 MiniMax 官方接口。</small>
+            <small>仅在《春心错认》状态卡片的「未曾说出口」旁显示按钮。点击播放，再点停止；不会自动朗读。</small>
+        </div>
+    </div>
+</div>
