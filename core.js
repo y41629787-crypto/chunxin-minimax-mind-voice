@@ -11,14 +11,32 @@ const MAX_CACHE_ENTRIES = 24;
 const MIN_SPEED = 0.5;
 const MAX_SPEED = 2;
 
-/** Extract the unspoken field from the status block in one raw chat message. */
-export function extractUnspoken(messageText) {
+const VOICE_FIELDS = Object.freeze({
+    unspoken: Object.freeze({ tag: '未言', label: '未曾说出口' }),
+    love: Object.freeze({ tag: '情话', label: '耳语情话' }),
+});
+
+/** Extract one supported voice field from the status block in one raw chat message. */
+export function extractVoiceText(messageText, field = 'unspoken') {
     if (typeof messageText !== 'string') return '';
+    const config = VOICE_FIELDS[field];
+    if (!config) return '';
 
     const status = messageText.match(/<帘隙\s*>([\s\S]*?)<\/帘隙\s*>/i)?.[1];
     if (!status) return '';
 
-    return status.match(/<未言\s*>([\s\S]*?)<\/未言\s*>/i)?.[1]?.trim() ?? '';
+    const escapedTag = config.tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return status.match(new RegExp(`<${escapedTag}\\s*>([\\s\\S]*?)<\\/${escapedTag}\\s*>`, 'i'))?.[1]?.trim() ?? '';
+}
+
+/** Keep the original public helper compatible with existing callers. */
+export function extractUnspoken(messageText) {
+    return extractVoiceText(messageText, 'unspoken');
+}
+
+export function createVoiceScope(chatId, messageId, field = 'unspoken') {
+    const safeField = Object.hasOwn(VOICE_FIELDS, field) ? field : 'unspoken';
+    return `${chatId ?? 'unknown-chat'}:${messageId}:${safeField}`;
 }
 
 export function findVoiceLabels(messageElement) {
@@ -27,22 +45,30 @@ export function findVoiceLabels(messageElement) {
     for (const card of cards) {
         const candidates = card.querySelectorAll('[class~="cx-key"], [class~="custom-cx-key"]');
         for (const label of candidates) {
-            if (label.textContent.trim() === '未曾说出口') labels.push(label);
+            if (Object.values(VOICE_FIELDS).some(config => config.label === label.textContent.trim())) labels.push(label);
         }
     }
     return labels;
 }
 
 /** Insert one idempotent play/stop button at each matching label. */
-export function addVoiceButtonsToMessage(messageElement, documentImpl = globalThis.document, buttonClass = 'cx-mind-voice-button') {
+export function addVoiceButtonsToMessage(messageElement, documentImpl = globalThis.document, buttonClass = 'cx-mind-voice-button', rawMessageText = '') {
     let inserted = 0;
     for (const label of findVoiceLabels(messageElement)) {
-        if (label.querySelector(`.${buttonClass}`)) continue;
+        const field = Object.entries(VOICE_FIELDS).find(([, config]) => config.label === label.textContent.trim())?.[0];
+        if (!field) continue;
+        const existingButton = label.querySelector(`.${buttonClass}`);
+        if (!extractVoiceText(rawMessageText, field)) {
+            existingButton?.remove();
+            continue;
+        }
+        if (existingButton) continue;
         const button = documentImpl.createElement('button');
         button.type = 'button';
         button.className = buttonClass;
+        button.dataset.cxVoiceField = field;
         button.textContent = '▶';
-        button.title = '朗读未曾说出口';
+        button.title = `朗读${VOICE_FIELDS[field].label}`;
         button.setAttribute('aria-label', button.title);
         label.append(button);
         inserted++;

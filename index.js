@@ -1,6 +1,6 @@
 import { eventSource, event_types, getCurrentChatId, saveSettingsDebounced } from '../../../../script.js';
 import { extension_settings, getContext, renderExtensionTemplateAsync } from '../../../extensions.js';
-import { addVoiceButtonsToMessage, buildGenerationPayload, createVoicePlaybackController, DEFAULT_API_REGION, extractUnspoken, observeChatUpdates, requestMiniMaxAudio, resolveApiRegion, SUPPORTED_API_REGIONS } from './core.js';
+import { addVoiceButtonsToMessage, buildGenerationPayload, createVoicePlaybackController, createVoiceScope, DEFAULT_API_REGION, extractVoiceText, observeChatUpdates, requestMiniMaxAudio, resolveApiRegion, SUPPORTED_API_REGIONS } from './core.js';
 
 const MODULE_NAME = 'third-party/chunxin-minimax-mind-voice';
 const SETTINGS_KEY = 'chunxinMindVoice';
@@ -44,10 +44,11 @@ function getSettings() {
 function setButtonState(scope, state) {
     const button = [...document.querySelectorAll(`.${BUTTON_CLASS}`)].find(element => element.dataset.cxVoiceScope === scope);
     if (!button) return;
+    const label = button.dataset.cxVoiceField === 'love' ? '耳语情话' : '未曾说出口';
     button.disabled = false;
     button.textContent = state === 'loading' ? '…' : state === 'playing' ? '■' : '▶';
     button.setAttribute('aria-busy', String(state === 'loading'));
-    button.title = state === 'loading' ? '点击取消生成' : state === 'playing' ? '点击停止' : '朗读未曾说出口';
+    button.title = state === 'loading' ? '点击取消生成' : state === 'playing' ? '点击停止' : `朗读${label}`;
     button.setAttribute('aria-label', button.title);
 }
 
@@ -103,7 +104,9 @@ async function playBlob(blob, { onEnded }) {
 }
 
 function addButtonsToMessage(messageElement) {
-    addVoiceButtonsToMessage(messageElement, document, BUTTON_CLASS);
+    const messageId = Number(messageElement.closest('.mes')?.getAttribute('mesid'));
+    const rawMessage = Number.isInteger(messageId) ? getContext().chat?.[messageId]?.mes ?? '' : '';
+    addVoiceButtonsToMessage(messageElement, document, BUTTON_CLASS, rawMessage);
 }
 
 function addButtonsToChat() {
@@ -121,8 +124,8 @@ function queueButtonScan() {
     });
 }
 
-function messageScope(messageId) {
-    return `${getCurrentChatId() ?? 'unknown-chat'}:${messageId}`;
+function messageScope(messageId, field = 'unspoken') {
+    return createVoiceScope(getCurrentChatId(), messageId, field);
 }
 
 async function onVoiceButtonClick(event) {
@@ -133,8 +136,9 @@ async function onVoiceButtonClick(event) {
 
     const messageElement = button.closest('.mes');
     const messageId = Number(messageElement?.getAttribute('mesid'));
+    const field = button.dataset.cxVoiceField === 'love' ? 'love' : 'unspoken';
     if (Number.isInteger(messageId)) {
-        const scope = messageScope(messageId);
+        const scope = messageScope(messageId, field);
         if (playback.isActive(scope)) {
             await playback.toggle({ scope });
             return;
@@ -146,9 +150,10 @@ async function onVoiceButtonClick(event) {
         return;
     }
 
-    const text = extractUnspoken(message.mes);
+    const text = extractVoiceText(message.mes, field);
     if (!text) {
-        globalThis.toastr?.info?.('当前楼层没有可朗读的「未曾说出口」内容。', '心声语音');
+        const label = field === 'love' ? '耳语情话' : '未曾说出口';
+        globalThis.toastr?.info?.(`当前楼层没有可朗读的「${label}」内容。`, '心声语音');
         return;
     }
 

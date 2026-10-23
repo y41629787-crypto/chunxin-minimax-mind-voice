@@ -1,14 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import * as core from '../core.js';
+import * as core from './core.js';
 import {
+    extractVoiceText,
+    createVoiceScope,
     buildGenerationPayload,
     addVoiceButtonsToMessage,
     createVoicePlaybackController,
     extractUnspoken,
     findVoiceLabels,
     requestMiniMaxAudio,
-} from '../core.js';
+} from './core.js';
 
 const message = (inner) => `正文\n<帘隙><日期>2026.10.23</日期><未言>${inner}</未言></帘隙>`;
 
@@ -45,6 +47,21 @@ test('extracts only the current message status-bar 未言 value', () => {
     assert.equal(extractUnspoken('<未言>没有帘隙边界</未言>'), '');
 });
 
+test('extracts 未言 and 情话 independently from the current message status block', () => {
+    const source = '<帘隙><未言>心里的话</未言><情话>悄悄说给你</情话></帘隙>';
+    assert.equal(extractVoiceText(source, 'unspoken'), '心里的话');
+    assert.equal(extractVoiceText(source, 'love'), '悄悄说给你');
+    assert.equal(extractVoiceText('<情话>边界外</情话>' + source, 'love'), '悄悄说给你');
+    assert.equal(extractVoiceText('<帘隙><未言>只有旧字段</未言></帘隙>', 'love'), '');
+    assert.equal(extractVoiceText('<帘隙><情话>   </情话></帘隙>', 'love'), '');
+});
+
+test('keeps voice playback scopes separate by chat, message, and field', () => {
+    assert.notEqual(createVoiceScope('chat-a', 4, 'unspoken'), createVoiceScope('chat-a', 4, 'love'));
+    assert.notEqual(createVoiceScope('chat-a', 4, 'love'), createVoiceScope('chat-a', 5, 'love'));
+    assert.notEqual(createVoiceScope('chat-a', 4, 'love'), createVoiceScope('chat-b', 4, 'love'));
+});
+
 test('locates the dedicated label inside the frosted status card only', () => {
     const makeLabel = text => ({
         textContent: text,
@@ -74,24 +91,45 @@ test('matches the sanitized custom-cx classes in the supplied regex output', () 
     assert.deepEqual(findVoiceLabels(message), [target]);
 });
 
-test('inserts one play button beside the target label and does not duplicate it', () => {
+test('inserts one button per nonempty voice field, keeps legacy messages compatible, and avoids duplicates', () => {
     const buttons = [];
-    const label = {
-        textContent: '未曾说出口',
-        querySelector: selector => selector === '.cx-mind-voice-button' ? buttons[0] ?? null : null,
-        append: button => buttons.push(button),
-    };
-    const card = { querySelectorAll: () => [label] };
+    const makeLabel = text => ({
+        textContent: text,
+        querySelector(selector) {
+            return selector === '.cx-mind-voice-button'
+                ? buttons.find(button => button.parent === this) ?? null
+                : null;
+        },
+        append(button) {
+            button.parent = this;
+            button.remove = () => buttons.splice(buttons.indexOf(button), 1);
+            buttons.push(button);
+        },
+    });
+    const unspoken = makeLabel('未曾说出口');
+    const loveLabel = makeLabel('耳语情话');
+    const labels = [unspoken, loveLabel];
+    const card = { querySelectorAll: () => labels };
     const message = { querySelectorAll: selector => selector === '.cx-card, .custom-cx-card' ? [card] : [] };
     const documentImpl = {
-        createElement: tag => ({ tag, attributes: {}, setAttribute(name, value) { this.attributes[name] = value; } }),
+        createElement: tag => ({ tag, attributes: {}, dataset: {}, setAttribute(name, value) { this.attributes[name] = value; } }),
     };
 
-    assert.equal(addVoiceButtonsToMessage(message, documentImpl), 1);
+    assert.equal(addVoiceButtonsToMessage(message, documentImpl, 'cx-mind-voice-button', '<帘隙><未言>旧消息内容</未言></帘隙>'), 1);
     assert.equal(buttons[0].type, 'button');
     assert.equal(buttons[0].textContent, '▶');
     assert.equal(buttons[0].attributes['aria-label'], '朗读未曾说出口');
-    assert.equal(addVoiceButtonsToMessage(message, documentImpl), 0);
+    assert.equal(buttons[0].dataset.cxVoiceField, 'unspoken');
+    assert.equal(addVoiceButtonsToMessage(message, documentImpl, 'cx-mind-voice-button', '<帘隙><未言>旧消息内容</未言></帘隙>'), 0);
+    assert.equal(buttons.length, 1);
+
+    assert.equal(addVoiceButtonsToMessage(message, documentImpl, 'cx-mind-voice-button', '<帘隙><未言>新消息</未言><情话>只读情话</情话></帘隙>'), 1);
+    assert.equal(buttons.length, 2);
+    assert.equal(buttons[1].dataset.cxVoiceField, 'love');
+    assert.equal(buttons[1].attributes['aria-label'], '朗读耳语情话');
+    assert.equal(addVoiceButtonsToMessage(message, documentImpl, 'cx-mind-voice-button', '<帘隙><未言>新消息</未言><情话>只读情话</情话></帘隙>'), 0);
+    assert.equal(addVoiceButtonsToMessage(message, documentImpl, 'cx-mind-voice-button', '<帘隙><未言>新消息</未言><情话> </情话></帘隙>'), 0);
+    assert.equal(buttons.some(button => button.dataset.cxVoiceField === 'love'), false);
     assert.equal(buttons.length, 1);
 });
 
@@ -273,6 +311,30 @@ test('a second click on the same floor stops its active audio', async () => {
 
     assert.equal(stopCount, 1);
     assert.equal(controller.isActive(request.scope), false);
+});
+
+test('switching between voice fields stops the previous field and toggles the selected one', async () => {
+    let stopCount = 0;
+    let synthesizeCount = 0;
+    const controller = createVoicePlaybackController({
+        synthesize: async () => {
+            synthesizeCount++;
+            return new Blob(['audio']);
+        },
+        play: async () => ({ stop: () => stopCount++ }),
+    });
+    const unspokenScope = createVoiceScope('chat-a', 4, 'unspoken');
+    const loveScope = createVoiceScope('chat-a', 4, 'love');
+
+    await controller.toggle({ scope: unspokenScope, text: '原来的心声', voiceId: 'v' });
+    await controller.toggle({ scope: loveScope, text: '对应的情话', voiceId: 'v' });
+    assert.equal(controller.isActive(unspokenScope), false);
+    assert.equal(controller.isActive(loveScope), true);
+    assert.equal(stopCount, 1);
+    await controller.toggle({ scope: loveScope });
+    assert.equal(controller.isActive(loveScope), false);
+    assert.equal(stopCount, 2);
+    assert.equal(synthesizeCount, 2);
 });
 
 test('a second click cancels a synthesis request that has not returned yet', async () => {

@@ -1,5 +1,13 @@
 # History
 
+## Local update — add 「耳语情话」 playback
+
+- Added an independent play/stop button for the current floor's `<情话>` field beside the rendered `耳语情话` label. The existing `<未言>` button remains and both buttons use the same MiniMax settings, playback controller, and cache.
+- Button discovery matches the rendered label within `.cx-card` and sanitized `custom-cx-*` classes; raw text is resolved from the matching active-chat message by `mesid`. Empty or missing fields do not get buttons, and edits that clear a field remove its stale button.
+- Playback scope now includes chat, message, and field. Selecting the other field stops the current playback; repeated rendering does not duplicate buttons.
+- No regex, status-bar styling, world info, character card, SillyTavern core, server plugin, or API key was changed.
+- Tests: 25 Node tests pass with mocked DOM/fetch. A local copy was placed in the isolated Tavern extension folder, but UI verification could not run because the isolated server's configuration files contain unresolved Git merge markers and fail YAML parsing. No paid MiniMax request was made; no GitHub push, tag, or release has occurred.
+
 ## V1.3.0 — standalone browser client
 
 - Replaces the earlier paired client/server runtime with a single SillyTavern client extension. The extension does not require or call a dedicated server plugin.
