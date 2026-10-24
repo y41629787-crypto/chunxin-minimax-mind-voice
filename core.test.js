@@ -14,12 +14,11 @@ import {
 
 const message = (inner) => `正文\n<帘隙><日期>2026.10.23</日期><未言>${inner}</未言></帘隙>`;
 
-test('schedules a chat scan when a status card is inserted after extension initialization', async () => {
-    assert.equal(typeof core.observeChatUpdates, 'function');
+test('reports only floors affected by coalesced DOM changes and ignores button updates', async () => {
     let observerCallback;
     let observerOptions;
     let disconnected = false;
-    let scanCount = 0;
+    const updates = [];
     class TestMutationObserver {
         constructor(callback) { observerCallback = callback; }
         observe(root, options) { observerOptions = { root, options }; }
@@ -27,18 +26,129 @@ test('schedules a chat scan when a status card is inserted after extension initi
     }
 
     const chatRoot = {};
-    const dispose = core.observeChatUpdates(chatRoot, () => scanCount++, TestMutationObserver);
+    const makeMessage = id => {
+        const message = {
+            id,
+            nodeType: 1,
+            isConnected: true,
+            matches: selector => selector === '.mes',
+            querySelectorAll: () => [],
+        };
+        message.closest = selector => selector === '.mes' ? message : null;
+        return message;
+    };
+    const changedFloor = makeMessage('changed');
+    const addedFloor = makeMessage('added');
+    const removedFloor = makeMessage('removed');
+    const dispose = core.observeChatUpdates(chatRoot, update => updates.push(update), TestMutationObserver);
     assert.deepEqual(observerOptions, {
         root: chatRoot,
         options: { childList: true, subtree: true, characterData: true },
     });
-    observerCallback([]);
-    observerCallback([]);
-    await new Promise(resolve => setImmediate(resolve));
+    observerCallback([
+        { type: 'characterData', target: { nodeType: 3, parentElement: changedFloor }, addedNodes: [], removedNodes: [] },
+        { type: 'characterData', target: { nodeType: 3, parentElement: changedFloor }, addedNodes: [], removedNodes: [] },
+        { type: 'childList', target: chatRoot, addedNodes: [addedFloor], removedNodes: [removedFloor] },
+        { type: 'childList', target: changedFloor, addedNodes: [{ nodeType: 1, matches: selector => selector === '.cx-mind-voice-button' }], removedNodes: [] },
+    ]);
+    await new Promise(resolve => setTimeout(resolve, 125));
 
-    assert.equal(scanCount, 1);
+    assert.equal(updates.length, 1);
+    assert.deepEqual(updates[0], {
+        changedMessages: [changedFloor],
+        addedMessages: [addedFloor],
+        removedMessages: [removedFloor],
+    });
+    observerCallback([{ type: 'childList', target: changedFloor, addedNodes: [{ nodeType: 1, matches: selector => selector === '.cx-mind-voice-button' }], removedNodes: [] }]);
+    await new Promise(resolve => setTimeout(resolve, 125));
+    assert.equal(updates.length, 1);
     dispose();
     assert.equal(disconnected, true);
+});
+
+test('limits first-open content scans to the most recent five floors', () => {
+    assert.equal(typeof core.getRecentMessages, 'function');
+    const messages = Array.from({ length: 2000 }, (_, index) => ({ index }));
+    assert.deepEqual(core.getRecentMessages(messages, 5).map(message => message.index), [1995, 1996, 1997, 1998, 1999]);
+});
+
+test('tracks 2000 floor containers without inspecting their card contents until they become visible', () => {
+    assert.equal(typeof core.observeVisibleChatMessages, 'function');
+    const messages = Array.from({ length: 2000 }, (_, index) => ({
+        id: index,
+        nodeType: 1,
+        isConnected: true,
+        matches: selector => selector === '.mes',
+        querySelectorAll() { throw new Error('off-screen message body must not be inspected'); },
+    }));
+    const observed = new Set();
+    let intersectionCallback;
+    let visibleUpdates = [];
+    class TestIntersectionObserver {
+        constructor(callback, options) { intersectionCallback = callback; this.options = options; }
+        observe(message) { observed.add(message); }
+        unobserve(message) { observed.delete(message); }
+        disconnect() { observed.clear(); }
+    }
+    const chatRoot = { querySelectorAll: selector => selector === '.mes' ? messages : [] };
+    const visibility = core.observeVisibleChatMessages(chatRoot, floors => { visibleUpdates.push(floors); }, TestIntersectionObserver);
+
+    assert.equal(observed.size, 2000);
+    assert.deepEqual(visibility.getRecent(5), messages.slice(-5));
+    intersectionCallback([
+        { target: messages[10], isIntersecting: false },
+        { target: messages[1000], isIntersecting: true },
+    ]);
+    assert.deepEqual(visibleUpdates, [[messages[1000]]]);
+    assert.deepEqual(visibility.getVisible(), [messages[1000]]);
+    const newMessage = {
+        nodeType: 1,
+        isConnected: true,
+        matches: selector => selector === '.mes',
+        querySelectorAll() { throw new Error('new off-screen message body must not be inspected'); },
+    };
+    visibility.observe(newMessage);
+    assert.equal(observed.has(newMessage), true);
+    assert.equal(visibility.getRecent(1)[0], newMessage);
+    visibility.unobserve(messages[0]);
+    assert.equal(observed.has(messages[0]), false);
+    visibility.disconnect();
+    assert.equal(observed.size, 0);
+});
+
+test('scans just one newly added floor, but bounds a bulk history insertion to recent and visible floors', () => {
+    assert.equal(typeof core.selectMessagesToScan, 'function');
+    const existingEdit = { id: 'edited-existing' };
+    const oneNewFloor = { id: 'new-floor' };
+    assert.deepEqual(core.selectMessagesToScan({
+        changedMessages: [existingEdit, oneNewFloor],
+        addedMessages: [oneNewFloor],
+        recentMessages: [],
+        visibleMessages: [],
+    }), [existingEdit, oneNewFloor]);
+
+    const bulkHistory = Array.from({ length: 2000 }, (_, index) => ({ id: index }));
+    const visibleFloor = bulkHistory[100];
+    const latestFive = bulkHistory.slice(-5);
+    const result = core.selectMessagesToScan({
+        changedMessages: bulkHistory,
+        addedMessages: bulkHistory,
+        recentMessages: latestFive,
+        visibleMessages: [visibleFloor],
+    });
+    assert.equal(result.length, 6);
+    assert.equal(result.includes(visibleFloor), true);
+    assert.deepEqual(result.slice(-5), latestFive);
+
+    const delayedHistoricalChanges = core.selectMessagesToScan({
+        changedMessages: bulkHistory,
+        addedMessages: [],
+        recentMessages: latestFive,
+        visibleMessages: [visibleFloor],
+    });
+    assert.equal(delayedHistoricalChanges.length, 6);
+    assert.equal(delayedHistoricalChanges.includes(visibleFloor), true);
+    assert.deepEqual(delayedHistoricalChanges.slice(-5), latestFive);
 });
 
 test('extracts only the current message status-bar 未言 value', () => {

@@ -1,5 +1,15 @@
 # History
 
+## V1.3.1 — bounded long-chat scanning
+
+- Root cause found in code: V1.3.0 scheduled a query of every rendered message after any chat DOM mutation. In long chats, repeated renderer updates could cause repeated full-history scans and stall the interface; this exact user's freeze was not reproduced in a live Tavern session.
+- Updated scanning so chat open checks the latest five floors and visible floors; changes within one message scan that message; older floors are checked when they enter the viewport. Large batches of more than five simultaneous message changes are limited to the latest five plus visible floors.
+- The visibility observer registers message containers but does not inspect off-screen card contents. Existing `<未言>` and `<情话>` buttons, MiniMax settings, playback, cache, API region selection, and ordinary chat TTS behavior remain.
+- Simplified the settings hint to mention both playback sections and current-floor-only reading.
+- Correction to the earlier “Local update — add 「耳语情话」 playback” note: the current public `main` source already contains the `<情话>` playback implementation; this update preserves it.
+- Tests: 28 Node tests pass, including simulated 2,000-floor visibility and bulk-change limits. These tests do not measure live SillyTavern browser performance. No real API Key was read and no paid MiniMax request was made.
+- Formal GitHub Release and version tag: not created.
+
 ## Local update — add 「耳语情话」 playback
 
 - Added an independent play/stop button for the current floor's `<情话>` field beside the rendered `耳语情话` label. The existing `<未言>` button remains and both buttons use the same MiniMax settings, playback controller, and cache.

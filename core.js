@@ -84,22 +84,185 @@ export function resolveApiRegion({ apiRegion, hasLegacySettings = false, legacyA
     return 'international';
 }
 
-/** Re-scan chat markup after a status card is rendered or replaced asynchronously. */
+function collectMessageElements(node) {
+    if (node?.nodeType !== 1) return [];
+    if (node.matches?.('.mes')) return [node];
+    return [...(node.querySelectorAll?.('.mes') ?? [])];
+}
+
+/** Return the latest N message elements without inspecting their card contents. */
+export function getRecentMessages(rootOrMessages, count = 5) {
+    const limit = Number.isFinite(Number(count)) ? Math.max(0, Math.floor(Number(count))) : 5;
+    if (limit === 0) return [];
+    const messages = Array.isArray(rootOrMessages)
+        ? rootOrMessages
+        : [...(rootOrMessages?.querySelectorAll?.('.mes') ?? [])];
+    return messages.slice(-limit);
+}
+
+/** Track message visibility so older floors are inspected only when they enter the chat viewport. */
+export function observeVisibleChatMessages(root, onVisible = () => {}, IntersectionObserverImpl = globalThis.IntersectionObserver) {
+    if (!root?.querySelectorAll) {
+        return { getRecent: () => [], getVisible: () => [], observe: () => {}, unobserve: () => {}, disconnect: () => {} };
+    }
+
+    const messages = [...root.querySelectorAll('.mes')];
+    const trackedMessages = new Set(messages);
+    const visibleMessages = new Set();
+    const observer = typeof IntersectionObserverImpl === 'function'
+        ? new IntersectionObserverImpl(entries => {
+            const entering = [];
+            for (const entry of entries) {
+                if (entry.isIntersecting && entry.target?.isConnected !== false) {
+                    visibleMessages.add(entry.target);
+                    entering.push(entry.target);
+                } else {
+                    visibleMessages.delete(entry.target);
+                }
+            }
+            if (entering.length) onVisible(entering);
+        }, { root })
+        : null;
+
+    for (const message of messages) observer?.observe(message);
+
+    function compareMessages(left, right) {
+        const position = left.compareDocumentPosition?.(right) ?? 0;
+        if (position & 4) return -1;
+        if (position & 2) return 1;
+        return 0;
+    }
+
+    function observe(nodeOrNodes) {
+        const nodes = Array.isArray(nodeOrNodes) ? nodeOrNodes : [nodeOrNodes];
+        const incoming = new Set(nodes.flatMap(collectMessageElements));
+        const fresh = [...incoming].filter(message => !trackedMessages.has(message));
+        if (!fresh.length) return;
+
+        if (fresh.length === 1) {
+            const message = fresh[0];
+            let low = 0;
+            let high = messages.length;
+            while (low < high) {
+                const middle = (low + high) >>> 1;
+                if (compareMessages(messages[middle], message) <= 0) low = middle + 1;
+                else high = middle;
+            }
+            messages.splice(low, 0, message);
+        } else {
+            fresh.sort(compareMessages);
+            const merged = [];
+            let existingIndex = 0;
+            let incomingIndex = 0;
+            while (existingIndex < messages.length && incomingIndex < fresh.length) {
+                if (compareMessages(messages[existingIndex], fresh[incomingIndex]) <= 0) merged.push(messages[existingIndex++]);
+                else merged.push(fresh[incomingIndex++]);
+            }
+            merged.push(...messages.slice(existingIndex), ...fresh.slice(incomingIndex));
+            messages.length = 0;
+            for (const message of merged) messages.push(message);
+        }
+
+        for (const message of fresh) {
+            trackedMessages.add(message);
+            observer?.observe(message);
+        }
+    }
+
+    function unobserve(nodeOrNodes) {
+        const nodes = Array.isArray(nodeOrNodes) ? nodeOrNodes : [nodeOrNodes];
+        const removed = new Set(nodes.flatMap(collectMessageElements));
+        if (!removed.size) return;
+        for (const message of removed) {
+            observer?.unobserve(message);
+            trackedMessages.delete(message);
+            visibleMessages.delete(message);
+        }
+        const remaining = messages.filter(message => !removed.has(message));
+        messages.length = 0;
+        for (const message of remaining) messages.push(message);
+    }
+
+    return {
+        getRecent: count => getRecentMessages(messages, count),
+        getVisible: () => [...visibleMessages],
+        observe,
+        unobserve,
+        disconnect() {
+            observer?.disconnect();
+            trackedMessages.clear();
+            visibleMessages.clear();
+            messages.length = 0;
+        },
+    };
+}
+
+/** Select only changed floors; large history insertions are limited to recent and visible floors. */
+export function selectMessagesToScan({ changedMessages = [], addedMessages = [], recentMessages = [], visibleMessages = [] } = {}) {
+    const candidates = new Set([...changedMessages, ...addedMessages]);
+    if (candidates.size <= 5) return [...candidates];
+
+    const messages = new Set();
+    for (const message of visibleMessages) messages.add(message);
+    for (const message of recentMessages) messages.add(message);
+    return [...messages];
+}
+
+/** Report only message elements affected by chat mutations, coalesced into one batch. */
 export function observeChatUpdates(root, onUpdate, MutationObserverImpl = globalThis.MutationObserver) {
     if (!root || typeof MutationObserverImpl !== 'function') return () => {};
 
-    let scanQueued = false;
-    const observer = new MutationObserverImpl(() => {
-        if (scanQueued) return;
-        scanQueued = true;
-        queueMicrotask(() => {
-            scanQueued = false;
-            onUpdate();
-        });
+    let scanTimer;
+    const changedMessages = new Set();
+    const addedMessages = new Set();
+    const removedMessages = new Set();
+    const isVoiceButtonMutation = record => {
+        const target = record.target?.nodeType === 1 ? record.target : record.target?.parentElement;
+        if (target?.closest?.('.cx-mind-voice-button')) return true;
+        if (record.type !== 'childList') return false;
+        const changedNodes = [...(record.addedNodes ?? []), ...(record.removedNodes ?? [])];
+        return changedNodes.length > 0 && changedNodes.every(node =>
+            node.nodeType === 1 && node.matches?.('.cx-mind-voice-button'),
+        );
+    };
+    const observer = new MutationObserverImpl(records => {
+        if (!records?.length || records.every(isVoiceButtonMutation)) return;
+
+        for (const record of records) {
+            const target = record.target?.nodeType === 1 ? record.target : record.target?.parentElement;
+            const changedMessage = target?.closest?.('.mes');
+            if (changedMessage) changedMessages.add(changedMessage);
+
+            if (record.type !== 'childList') continue;
+            for (const node of record.addedNodes ?? []) {
+                for (const message of collectMessageElements(node)) addedMessages.add(message);
+            }
+            for (const node of record.removedNodes ?? []) {
+                for (const message of collectMessageElements(node)) removedMessages.add(message);
+            }
+        }
+
+        if (!changedMessages.size && !addedMessages.size && !removedMessages.size) return;
+        clearTimeout(scanTimer);
+        scanTimer = setTimeout(() => {
+            const removed = [...removedMessages];
+            const added = [...addedMessages];
+            const changed = [...changedMessages].filter(message => !removedMessages.has(message));
+            changedMessages.clear();
+            addedMessages.clear();
+            removedMessages.clear();
+            onUpdate({ changedMessages: changed, addedMessages: added, removedMessages: removed });
+        }, 100);
     });
 
     observer.observe(root, { childList: true, subtree: true, characterData: true });
-    return () => observer.disconnect();
+    return () => {
+        clearTimeout(scanTimer);
+        changedMessages.clear();
+        addedMessages.clear();
+        removedMessages.clear();
+        observer.disconnect();
+    };
 }
 
 /** Build normalized speech settings; endpoint selection is restricted to official MiniMax hosts. */

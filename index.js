@@ -1,6 +1,6 @@
 import { eventSource, event_types, getCurrentChatId, saveSettingsDebounced } from '../../../../script.js';
 import { extension_settings, getContext, renderExtensionTemplateAsync } from '../../../extensions.js';
-import { addVoiceButtonsToMessage, buildGenerationPayload, createVoicePlaybackController, createVoiceScope, DEFAULT_API_REGION, extractVoiceText, observeChatUpdates, requestMiniMaxAudio, resolveApiRegion, SUPPORTED_API_REGIONS } from './core.js';
+import { addVoiceButtonsToMessage, buildGenerationPayload, createVoicePlaybackController, createVoiceScope, DEFAULT_API_REGION, extractVoiceText, observeChatUpdates, observeVisibleChatMessages, requestMiniMaxAudio, resolveApiRegion, selectMessagesToScan, SUPPORTED_API_REGIONS } from './core.js';
 
 const MODULE_NAME = 'third-party/chunxin-minimax-mind-voice';
 const SETTINGS_KEY = 'chunxinMindVoice';
@@ -10,7 +10,8 @@ const DEFAULT_SETTINGS = Object.freeze({ apiKey: '', voiceId: '', model: 'speech
 let playback;
 let initialized = false;
 let stopObservingChat;
-let scanQueued = false;
+let messageVisibility;
+let scanTimer;
 const eventListeners = [];
 
 function listen(event, callback) {
@@ -103,25 +104,53 @@ async function playBlob(blob, { onEnded }) {
     };
 }
 
-function addButtonsToMessage(messageElement) {
+function scanMessage(messageElement) {
+    if (messageElement?.isConnected === false) return;
+    const messageBody = messageElement.querySelector('.mes_text') ?? messageElement;
     const messageId = Number(messageElement.closest('.mes')?.getAttribute('mesid'));
     const rawMessage = Number.isInteger(messageId) ? getContext().chat?.[messageId]?.mes ?? '' : '';
-    addVoiceButtonsToMessage(messageElement, document, BUTTON_CLASS, rawMessage);
+    addVoiceButtonsToMessage(messageBody, document, BUTTON_CLASS, rawMessage);
 }
 
-function addButtonsToChat() {
-    for (const message of document.querySelectorAll('#chat .mes')) {
-        addButtonsToMessage(message.querySelector('.mes_text') ?? message);
-    }
+function scanMessages(messages) {
+    for (const message of new Set(messages ?? [])) scanMessage(message);
 }
 
-function queueButtonScan() {
-    if (scanQueued) return;
-    scanQueued = true;
-    queueMicrotask(() => {
-        scanQueued = false;
-        addButtonsToChat();
-    });
+function scanCurrentMessages() {
+    if (!messageVisibility) return;
+    scanMessages([...messageVisibility.getRecent(5), ...messageVisibility.getVisible()]);
+}
+
+function queueCurrentMessageScan() {
+    clearTimeout(scanTimer);
+    scanTimer = setTimeout(scanCurrentMessages, 100);
+}
+
+function handleChatMutations({ changedMessages = [], addedMessages = [], removedMessages = [] } = {}) {
+    messageVisibility?.unobserve(removedMessages);
+    messageVisibility?.observe(addedMessages);
+    scanMessages(selectMessagesToScan({
+        changedMessages,
+        addedMessages,
+        recentMessages: messageVisibility?.getRecent(5),
+        visibleMessages: messageVisibility?.getVisible(),
+    }));
+}
+
+function startMessageScanning() {
+    const chatRoot = document.getElementById('chat') ?? document.body;
+    messageVisibility = observeVisibleChatMessages(chatRoot, scanMessages);
+    stopObservingChat = observeChatUpdates(chatRoot, handleChatMutations);
+    scanCurrentMessages();
+}
+
+function stopMessageScanning() {
+    stopObservingChat?.();
+    stopObservingChat = undefined;
+    messageVisibility?.disconnect();
+    messageVisibility = undefined;
+    clearTimeout(scanTimer);
+    scanTimer = undefined;
 }
 
 function messageScope(messageId, field = 'unspoken') {
@@ -265,21 +294,13 @@ export async function init() {
         onError: showError,
     });
 
-    stopObservingChat = observeChatUpdates(
-        document.getElementById('chat') ?? document.body,
-        queueButtonScan,
-    );
+    startMessageScanning();
 
     document.addEventListener('click', onVoiceButtonClick);
-    for (const event of [event_types.CHARACTER_MESSAGE_RENDERED, event_types.MESSAGE_UPDATED, event_types.MESSAGE_SWIPED]) {
-        listen(event, queueButtonScan);
-    }
     listen(event_types.CHAT_CHANGED, () => {
         playback.stop();
-        queueButtonScan();
+        queueCurrentMessageScan();
     });
-
-    addButtonsToChat();
 }
 
 export function dispose() {
@@ -287,9 +308,7 @@ export function dispose() {
     initialized = false;
     playback?.stop();
     playback = undefined;
-    stopObservingChat?.();
-    stopObservingChat = undefined;
-    scanQueued = false;
+    stopMessageScanning();
     document.removeEventListener('click', onVoiceButtonClick);
     for (const [event, callback] of eventListeners.splice(0)) {
         eventSource.removeListener(event, callback);
